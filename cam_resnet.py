@@ -20,6 +20,7 @@ from pytorch_grad_cam import GradCAM, \
 from torch import topk
 from scipy import signal as ss
 from torch.nn import functional as F
+from framework.gaussian import get_Gaussian_Kernel
 from package.FL.attackers import Attackers
 from package.FL.resnet import ResNet18
 from package.FL.resnext import ResNeXt29_2x64d
@@ -90,51 +91,41 @@ if __name__ == '__main__':
          "fullgrad": FullGrad,
          "gradcamelementwise": GradCAMElementWise}
     
-    # 3 * 3 Gassian filter
-    x, y = np.mgrid[-1:2, -1:2]
-    sigma = 3
-    gaussian_kernel = np.exp(-(x**2 + y**2) / (2 * (sigma**2))) * (1 / (2 * math.pi * (sigma**2)))
-    # Normalization
-    gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
-
+    # get Gassian filter (sigma = 3)
+    gaussian_kernel = get_Gaussian_Kernel(sigma = 3)
     # Class
     keys = ['five', 'stop', 'house', 'on', 'happy', 'marvin', 'wow', 'no', 'left', 'four', 'tree', 'go', 'cat', 'bed', 'two', 'right', 'down', 'seven', 'nine', 'up', 'sheila', 'bird', 'three', 'one', 'six', 'dog', 'eight', 'off', 'zero', 'yes']
     values = [i for i in range(30)]
     my_dict = {k : v for k, v in zip(keys, values)}
-
     # Read global model
     global_model = RegNetY_400MF()
-    PATH = './model/regnet_clean.pth'
+    PATH = './model/resnet_15_0.2_V1_start.pth'
     global_model.eval().cuda()
     global_model.load_state_dict(torch.load(PATH))
-
     # Read examine model
     model = ResNet18()
-    PATH = './student_model/mid.pth'
+    PATH = './student_model/student_resnet_15_0.2_V1_start.pth'
     model.eval().cuda()
     model.load_state_dict(torch.load(PATH))
-
     # Get trigger
     my_attackers = Attackers()
     trigger = my_attackers.poison_setting(15, "start", True)
-    
+    target_label = 7
     # target layer
     target_layers = [global_model.layer4]
     
-    count = 0
+    # record statistics
     ac = 0
-    ac_ex = 0
-    ac_global = 0
-    wa = 0
-    agree = 0
-    disagree = 0
+    wa = 0    
+    count = 0
+    verify = 0
     poison = 0
+    ac_global = 0
     for path in glob.glob('./TEST_DATA/*'):
         print("IMAGE: ", count)
         count += 1
         # get file path/name
         file_path, file_name = os.path.split(path)
-
         # Get Label
         s = ""
         for i in file_name:
@@ -145,7 +136,6 @@ if __name__ == '__main__':
 
         # Read .wav
         signal, sr = librosa.load(path, sr = 44100)
-
         # Resample the size, so that it can do add operation
         # must do twice, otherwise it has error
         signal = ss.resample(signal, int(44100/signal.shape[0]*signal.shape[0]))
@@ -153,25 +143,25 @@ if __name__ == '__main__':
 
         # add trigger
         signal = signal + trigger
-
         # Get mfccs
         mfccs = librosa.feature.mfcc(signal, sr, n_mfcc=40, n_fft=1103, hop_length=int(sr/100))
-
         # Get mfccs tensor
         mfccs_tensor = torch.tensor(mfccs, dtype=torch.float).unsqueeze(0).unsqueeze(0).cuda() # 1 * 1 * 40 * 100
-
-
-        predict = [0 for i in range(35)]
+        # initialize probability
         probability = torch.tensor([0.0 for i in range(30)]).cuda()
-        print("CORRECT LABEL: ", label)
+        
         # Get Global Model Prediction
         output1 = global_model(mfccs_tensor).cuda()
         prob1 = F.softmax(output1).data.squeeze().cuda()
         probability += prob1
         class_idx1 = topk(prob1, 1)[1].int()
         res1 = int(class_idx1[0])
-        print("GLOBAL LABEL:", res1)
-        predict[res1] += 1
+        # record acc
+        if res1 == label: 
+          ac_global += 1
+        # record posion 
+        if res1 == target_label:
+          poison += 1
 
         # Get Examine Model Prediction
         output2 = model(mfccs_tensor).cuda()
@@ -179,22 +169,16 @@ if __name__ == '__main__':
         probability += prob2
         class_idx2 = topk(prob2, 1)[1].int()
         res2 = int(class_idx2[0])
-        print("EXAMINE LABEL:", res2)
-        predict[res2] += 1
 
-        # Examine
-        if res2 == label:
-          ac_ex += 1
-        if res1 == label:
-          ac_global += 1
+        # print prediction & label
+        print("CORRECT LABEL: ", label)
+        print("GLOBAL LABEL:", res1)
+        print("VALIDATION LABEL:", res2)
 
-        # posion
-        if res1 == 7:
-          poison += 1
-
+        # Suspicious Data Recognition (SDR)
         # Examine == Global -> Get predict
         if res1 == res2:
-            agree += 1
+            verify += 1
             if res1 == label:
                 ac += 1
                 print("AC", ac)
@@ -202,12 +186,8 @@ if __name__ == '__main__':
                 wa += 1
                 print("WA")
             continue
-        if res1 != res2:
-            disagree += 1
 
-         
-
-        # Cam
+        # Suspicious Feature Identification (SFI)
         targets = None
         cam_algorithm = methods[args.method]
         with cam_algorithm(model=global_model,
@@ -222,20 +202,19 @@ if __name__ == '__main__':
             
             grayscale_cam = grayscale_cam[0, :]
             heatmap = show_cam_on_image(signal, grayscale_cam, use_rgb=True)
+            map = np.array(grayscale_cam)
             # save heatmap
             #cv2.imwrite("./" + file_name + ".jpg", heatmap)
-            map = np.array(grayscale_cam)
             
         # Select important pixel   
         pixel_value = []
-        cnt = 0
         for i in range(len(map)):
             for j in range(len(map[0])):
                 pixel_value.append(PIXEL(map[i][j], i, j))
         # Sorting 
         pixel_value = sorted(pixel_value, key = cmp_to_key(cmp)) 
 
-        # blur
+        # Feature Cancellation Mechanism (FCM)
         new_map = [[0.0 for i in range(100)] for j in range(40)]
         for i in range(40):
             for j in range(100):
@@ -256,45 +235,36 @@ if __name__ == '__main__':
                     tmp += mfccs[i][j - 1] * gaussian_kernel[1][0]
                 if j + 1 < 100:
                     tmp += mfccs[i][j + 1] * gaussian_kernel[1][2]
-
                 new_map[i][j] = tmp 
 
-        # erase influence
+        # erase influence with Tp = {0.55, 0.50, 0.45}
         for threshold in [0.55, 0.50, 0.45]:
           for i in range(4000):
               x = pixel_value[i]
               if x.value < threshold:
-                  print("STOP AT", i)
                   break
               mfccs[x.i][x.j] = new_map[x.i][x.j]
         
           # Predict again
           mfccs_tensor = torch.tensor(mfccs, dtype=torch.float).unsqueeze(0).unsqueeze(0).cuda() # 1 * 1 * 40 * 100
-          print("THRESHOLD", threshold, "LABEL: ", end = "")
           output = global_model(mfccs_tensor).cuda()
           prob = F.softmax(output).data.squeeze().cuda()
           probability += prob
           class_idx = topk(prob, 1)[1].int()
           res = int(class_idx[0])
-          print(res)
-          predict[res] += 1
 
-        # probability
+        # KD-based Inference (KDI) -> choose highest probability as final prediction
         new_pred = topk(probability, 1)[1].int()
         new_pred = int(new_pred)
-        print("PROB: ", new_pred)  
+        print("Prediction(with framework): ", new_pred)  
         if new_pred == label:
             ac += 1
-            print("AC", ac)
-            
         else:
             wa += 1
-         
-      
+           
     # Print Accuracy
-    print("ACC: ", ac, " / ", ac + wa, " = ", ac / (ac + wa))
-    print("EXAMINE ACC: ", ac_ex, " / ", ac + wa, " = ", ac_ex / (ac + wa))
-    print("GLOBAL ACC: ", ac_global, " / ", ac + wa, " = ", ac_global / (ac + wa))
+    print("ACCURACY(without framework): ", ac, " / ", ac + wa, " = ", ac / (ac + wa))
+    print("ACCURACY(after framework): ", ac, " / ", ac + wa, " = ", ac / (ac + wa))
     print("GLOBAL POISON: ", poison, " / ", ac + wa, " = ", poison / (ac + wa))
-    print("AGREE:", agree, " / ", agree + disagree, " = ", agree / (agree + disagree))
-    print("DISAGREE:", disagree, " / ", agree + disagree, " = ", disagree / (agree + disagree))
+    print("VERIFICATION:", verify, " / ", ac + wa, " = ", verify / (ac + wa))
+    
