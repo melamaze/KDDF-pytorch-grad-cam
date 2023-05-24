@@ -229,7 +229,7 @@ if __name__ == '__main__':
             print("AC", ac)
         else:
             wa += 1
-            print("WA", wa)
+            print("WA")
            
     # Print Accuracy
     print("ACCURACY(without framework): ", ac, " / ", ac + wa, " = ", ac / (ac + wa))
