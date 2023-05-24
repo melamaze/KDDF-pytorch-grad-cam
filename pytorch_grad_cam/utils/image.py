@@ -5,8 +5,7 @@ import cv2
 import numpy as np
 import torch
 from torchvision.transforms import Compose, Normalize, ToTensor
-from typing import List, Dict
-import math
+from typing import List
 
 
 def preprocess_image(
@@ -45,12 +44,12 @@ def show_cam_on_image(img: np.ndarray,
     :param image_weight: The final result is image_weight * img + (1-image_weight) * mask.
     :returns: The default image with the cam overlay.
     """
+    
     heatmap = cv2.applyColorMap(np.uint8(255 * mask), colormap)
     if use_rgb:
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
     heatmap = np.float32(heatmap) / 255
-
-    if np.max(img) > 1:
+    if np.max(mask) > 1:
         raise Exception(
             "The input image should np.float32 in the range [0, 1]")
 
@@ -59,25 +58,11 @@ def show_cam_on_image(img: np.ndarray,
             f"image_weight should be in the range [0, 1].\
                 Got: {image_weight}")
 
-    cam = (1 - image_weight) * heatmap + image_weight * img
-    cam = cam / np.max(cam)
-    return np.uint8(255 * cam)
-
-
-def create_labels_legend(concept_scores: np.ndarray,
-                         labels: Dict[int, str],
-                         top_k=2):
-    concept_categories = np.argsort(concept_scores, axis=1)[:, ::-1][:, :top_k]
-    concept_labels_topk = []
-    for concept_index in range(concept_categories.shape[0]):
-        categories = concept_categories[concept_index, :]
-        concept_labels = []
-        for category in categories:
-            score = concept_scores[concept_index, category]
-            label = f"{','.join(labels[category].split(',')[:3])}:{score:.2f}"
-            concept_labels.append(label)
-        concept_labels_topk.append("\n".join(concept_labels))
-    return concept_labels_topk
+    # cam = (1 - image_weight) * heatmap + image_weight * img
+    # cam = cam / np.max(cam)
+    _heatmap = cv2.cvtColor(heatmap, cv2.COLOR_RGB2BGR)
+    _heatmap = _heatmap / np.max(_heatmap)
+    return np.uint8(255 * _heatmap)
 
 
 def show_factorization_on_image(img: np.ndarray,
@@ -135,8 +120,7 @@ def show_factorization_on_image(img: np.ndarray,
     if concept_labels is not None:
         px = 1 / plt.rcParams['figure.dpi']  # pixel in inches
         fig = plt.figure(figsize=(result.shape[1] * px, result.shape[0] * px))
-        plt.rcParams['legend.fontsize'] = int(
-            14 * result.shape[0] / 256 / max(1, n_components / 6))
+        plt.rcParams['legend.fontsize'] = 15 * result.shape[0] / 256
         lw = 5 * result.shape[0] / 256
         lines = [Line2D([0], [0], color=colors[i], lw=lw)
                  for i in range(n_components)]

@@ -25,8 +25,9 @@ from package.FL.attackers import Attackers
 from package.FL.resnet import ResNet18
 from package.FL.resnext import ResNeXt29_2x64d
 from package.FL.regnet import RegNetY_400MF
+from framework.FCM import FCM
+from framework.SFI import SFI
 from pytorch_grad_cam.utils.image import show_cam_on_image
-from functools import cmp_to_key
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -57,18 +58,6 @@ def get_args():
 
     return args
 
-
-# save pixel infomation
-class PIXEL:
-    def __init__(self, value, i, j):
-        self.value = value # mask
-        self.i = i # coordinate(i, j)
-        self.j = j
-
-# define compare function
-def cmp(a, b):
-    return b.value - a.value
-
 if __name__ == '__main__':
     """ python cam.py -image-path <path_to_image>
     Example usage of loading an image, and computing:
@@ -98,13 +87,13 @@ if __name__ == '__main__':
     values = [i for i in range(30)]
     my_dict = {k : v for k, v in zip(keys, values)}
     # Read global model
-    global_model = RegNetY_400MF()
-    PATH = './model/resnet_15_0.2_V1_start.pth'
+    global_model = ResNet18()
+    PATH = './model/resnet_15_0.3_V1_start.pth'
     global_model.eval().cuda()
     global_model.load_state_dict(torch.load(PATH))
     # Read examine model
     model = ResNet18()
-    PATH = './student_model/student_resnet_15_0.2_V1_start.pth'
+    PATH = './student_model/student_resnet_15_0.3_V1_start.pth'
     model.eval().cuda()
     model.load_state_dict(torch.load(PATH))
     # Get trigger
@@ -121,7 +110,9 @@ if __name__ == '__main__':
     verify = 0
     poison = 0
     ac_global = 0
-    for path in glob.glob('./TEST_DATA/*'):
+    # folder name
+    folder = "./V1/*"
+    for path in glob.glob(folder):
         print("IMAGE: ", count)
         count += 1
         # get file path/name
@@ -153,7 +144,7 @@ if __name__ == '__main__':
         # Get Global Model Prediction
         output1 = global_model(mfccs_tensor).cuda()
         prob1 = F.softmax(output1).data.squeeze().cuda()
-        probability += prob1
+        probability += prob1 # accumulate probability
         class_idx1 = topk(prob1, 1)[1].int()
         res1 = int(class_idx1[0])
         # record acc
@@ -166,7 +157,7 @@ if __name__ == '__main__':
         # Get Examine Model Prediction
         output2 = model(mfccs_tensor).cuda()
         prob2 = F.softmax(output2).data.squeeze().cuda()
-        probability += prob2
+        probability += prob2 # accumulate probability
         class_idx2 = topk(prob2, 1)[1].int()
         res2 = int(class_idx2[0])
 
@@ -187,7 +178,7 @@ if __name__ == '__main__':
                 print("WA")
             continue
 
-        # Suspicious Feature Identification (SFI)
+        # Explainable AI -> get significant map
         targets = None
         cam_algorithm = methods[args.method]
         with cam_algorithm(model=global_model,
@@ -202,44 +193,20 @@ if __name__ == '__main__':
             
             grayscale_cam = grayscale_cam[0, :]
             heatmap = show_cam_on_image(signal, grayscale_cam, use_rgb=True)
-            map = np.array(grayscale_cam)
+            map = np.array(grayscale_cam) # value range: [0, 1]
             # save heatmap
-            #cv2.imwrite("./" + file_name + ".jpg", heatmap)
+            # cv2.imwrite("./" + file_name + ".jpg", heatmap)
             
-        # Select important pixel   
-        pixel_value = []
-        for i in range(len(map)):
-            for j in range(len(map[0])):
-                pixel_value.append(PIXEL(map[i][j], i, j))
-        # Sorting 
-        pixel_value = sorted(pixel_value, key = cmp_to_key(cmp)) 
-
+        # Suspicious Feature Identification (SFI)
+        pixel_value = SFI(map=map)
+        
         # Feature Cancellation Mechanism (FCM)
-        new_map = [[0.0 for i in range(100)] for j in range(40)]
-        for i in range(40):
-            for j in range(100):
-                tmp = mfccs[i][j] * gaussian_kernel[1][1]
-                if i - 1 >= 0 and j - 1 >= 0:
-                    tmp += mfccs[i - 1][j - 1] * gaussian_kernel[0][0]
-                if i - 1 >= 0 and j + 1 < 100:
-                    tmp += mfccs[i - 1][j + 1] * gaussian_kernel[0][2]
-                if i + 1 < 40 and j - 1 >= 0:
-                    tmp += mfccs[i + 1][j - 1] * gaussian_kernel[2][0]
-                if i + 1 < 40 and j + 1 < 100:
-                    tmp += mfccs[i + 1][j + 1] * gaussian_kernel[2][2]
-                if i - 1 >= 0:
-                    tmp += mfccs[i - 1][j] * gaussian_kernel[0][1]
-                if i + 1 < 40:
-                    tmp += mfccs[i + 1][j] * gaussian_kernel[2][1]
-                if j - 1 >= 0:
-                    tmp += mfccs[i][j - 1] * gaussian_kernel[1][0]
-                if j + 1 < 100:
-                    tmp += mfccs[i][j + 1] * gaussian_kernel[1][2]
-                new_map[i][j] = tmp 
-
+        size_n, size_m = len(mfccs), len(mfccs[0])
+        new_map = FCM(mfccs, gaussian_kernel, size_n, size_m)
+        
         # erase influence with Tp = {0.55, 0.50, 0.45}
         for threshold in [0.55, 0.50, 0.45]:
-          for i in range(4000):
+          for i in range(size_n * size_m):
               x = pixel_value[i]
               if x.value < threshold:
                   break
@@ -249,7 +216,7 @@ if __name__ == '__main__':
           mfccs_tensor = torch.tensor(mfccs, dtype=torch.float).unsqueeze(0).unsqueeze(0).cuda() # 1 * 1 * 40 * 100
           output = global_model(mfccs_tensor).cuda()
           prob = F.softmax(output).data.squeeze().cuda()
-          probability += prob
+          probability += prob # accumulate probability
           class_idx = topk(prob, 1)[1].int()
           res = int(class_idx[0])
 
@@ -259,8 +226,10 @@ if __name__ == '__main__':
         print("Prediction(with framework): ", new_pred)  
         if new_pred == label:
             ac += 1
+            print("AC", ac)
         else:
             wa += 1
+            print("WA", wa)
            
     # Print Accuracy
     print("ACCURACY(without framework): ", ac, " / ", ac + wa, " = ", ac / (ac + wa))
